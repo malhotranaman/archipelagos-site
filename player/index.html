@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Only this page's script (by its hash: tests/youtube-relay.test.mjs checks it), YouTube's API, and its player. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-oTe8kvnn6xRN7aH/5/48QB5oZuI2+8qvsz9cUpcWzqA=' https://www.youtube.com; frame-src https://www.youtube-nocookie.com; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<meta name="robots" content="noindex">
+<title>Archipelagos Player</title>
+<style>
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+#player { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; }
+p { margin: 0; padding: 24px; color: #aaa; font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; text-align: center; }
+</style>
+</head>
+<body>
+<div id="player"></div>
+<script>
+// The Archipelagos apps show their interface from their own scheme (archipelagos://app), and YouTube refuses to
+// play in a page there (error 153: no valid referrer). Embedded in that page, this one plays the video from an https
+// origin instead, and tells the page how it's going (src/youtube-relay.ts in the app's repository).
+//
+// Everything comes in the fragment, which is never sent to this site: v, the video; parent, the embedding page's
+// origin, which must be the app's; start, in seconds; autoplay, 1 or 0; mode, api (reports and takes commands, the
+// default) or plain (only plays). Messages both ways are { type: 'archipelagos-youtube', ... }: the page sends
+// { command, args }, and this page sends { event: 'ready' | 'state' | 'error' | 'time', state, data, currentTime,
+// duration }, 'time' four times a second, only ever to the parent's origin.
+(function () {
+  'use strict';
+  var kind = 'archipelagos-youtube';
+  var hash = new URLSearchParams(location.hash.slice(1));
+  var id = hash.get('v') || '', parent = hash.get('parent') || '', api = hash.get('mode') !== 'plain';
+  var start = Math.max(0, Math.floor(Number(hash.get('start')) || 0)), autoplay = hash.get('autoplay') === '0' ? 0 : 1;
+  var commands = ['seekTo', 'playVideo', 'pauseVideo', 'mute', 'unMute'];
+  // The apps' own page, or the app in a browser on this Mac (npm start, the tests).
+  var allowed = function (origin) { return /^(archipelagos:\/\/app|http:\/\/(localhost|127\.0\.0\.1)(:\d{1,5})?)$/.test(origin); };
+
+  if (!/^[\w-]{11}$/.test(id) || !allowed(parent) || window.parent === window) {
+    var note = document.createElement('p');
+    note.textContent = 'This page plays videos inside Archipelagos.';
+    document.getElementById('player').replaceWith(note);
+    return;
+  }
+
+  var player = null, ticking = null;
+  var now = function () {
+    try { return { state: player.getPlayerState(), currentTime: player.getCurrentTime(), duration: player.getDuration() }; }
+    catch (error) { return {}; }
+  };
+  var tell = function (event, extra) {
+    if (!api) return;
+    var message = now();
+    message.type = kind; message.event = event;
+    for (var name in extra) message[name] = extra[name];
+    window.parent.postMessage(message, parent);
+  };
+
+  window.onYouTubeIframeAPIReady = function () {
+    var vars = { autoplay: autoplay, playsinline: 1, rel: 0, start: start, origin: location.origin };
+    // The app's page has its own Full Screen, which YouTube's would get in the way of (src/components/YouTubePlayer.tsx).
+    if (api) vars.fs = 0;
+    player = new YT.Player('player', {
+      host: 'https://www.youtube-nocookie.com', videoId: id, width: '100%', height: '100%', playerVars: vars,
+      events: {
+        onReady: function () {
+          tell('ready');
+          if (api && !ticking) ticking = setInterval(function () { tell('time'); }, 250);
+        },
+        onStateChange: function (event) { tell('state', { state: event.data }); },
+        onError: function (event) { tell('error', { data: event.data }); }
+      }
+    });
+  };
+
+  window.addEventListener('message', function (event) {
+    if (!api || !player || event.source !== window.parent || event.origin !== parent || !allowed(event.origin)) return;
+    var message = event.data;
+    if (!message || message.type !== kind || commands.indexOf(message.command) < 0) return;
+    var args = Array.isArray(message.args) ? message.args : [];
+    if (message.command === 'seekTo') {
+      if (typeof args[0] !== 'number' || !isFinite(args[0])) return;
+      args = [Math.max(0, args[0]), args[1] !== false];
+    } else args = [];
+    try { player[message.command].apply(player, args); } catch (error) { /* Not ready yet. */ }
+  });
+
+  var script = document.createElement('script');
+  script.src = 'https://www.youtube.com/iframe_api';
+  document.head.appendChild(script);
+})();
+</script>
+</body>
+</html>
